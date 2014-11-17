@@ -1,3 +1,4 @@
+
 var Engine = function(server, options) {
   this._server  = server;
   this._options = options || {};
@@ -10,7 +11,8 @@ var Engine = function(server, options) {
       gc     = this._options.gc       || this.DEFAULT_GC,
       client = this._options.client,
       subscriberClient = this._options.subscriberClient,
-      socket = this._options.socket;
+      socket = this._options.socket,
+      Scripto = require('gitter-redis-scripto');
 
   this._ns  = this._options.namespace || '';
 
@@ -26,6 +28,10 @@ var Engine = function(server, options) {
     }
     this._redis.select(db);
   }
+
+  // Create the script manager
+  this._scriptManager = new Scripto(this._redis);
+  this._scriptManager.loadFromDir(__dirname + '/redis-lua/');
 
   if (subscriberClient) {
     this._subscriber = subscriberClient;
@@ -84,7 +90,7 @@ Engine.prototype = {
   },
 
   clientExists: function(clientId, callback, context) {
-    var cutoff = new Date().getTime() - (1000 * 1.6 * this._server.timeout);
+    var cutoff = this._getCutOffTime();
 
     this._redis.zscore(this._ns + '/clients', clientId, function(error, score) {
       callback.call(context, parseInt(score, 10) > cutoff);
@@ -133,22 +139,42 @@ Engine.prototype = {
   },
 
   subscribe: function(clientId, channel, callback, context) {
-    var self = this;
-    this._redis.sadd(this._ns + '/clients/' + clientId + '/channels', channel, function(error, added) {
+    var self = this,
+        multi = this._redis.multi();
+
+    multi.sadd(this._ns + '/clients/' + clientId + '/channels', channel);
+    multi.sadd(this._ns + '/channels' + channel, clientId);
+
+    multi.exec(function(err, replies) {
+      if(err) {
+        if (callback) callback.call(context, err);
+        return;
+      }
+
+      var added = replies[0];
       if (added === 1) self._server.trigger('subscribe', clientId, channel);
-    });
-    this._redis.sadd(this._ns + '/channels' + channel, clientId, function() {
       self._server.debug('Subscribed client ? to channel ?', clientId, channel);
+
       if (callback) callback.call(context);
     });
   },
 
   unsubscribe: function(clientId, channel, callback, context) {
-    var self = this;
-    this._redis.srem(this._ns + '/clients/' + clientId + '/channels', channel, function(error, removed) {
+    var self = this,
+        multi = this._redis.multi();
+
+    multi.srem(this._ns + '/clients/' + clientId + '/channels', channel);
+    multi.srem(this._ns + '/channels' + channel, clientId);
+
+    multi.exec(function(err, replies) {
+      if(err) {
+        if (callback) callback.call(context, err);
+        return;
+      }
+
+      var removed = replies[0];
       if (removed === 1) self._server.trigger('unsubscribe', clientId, channel);
-    });
-    this._redis.srem(this._ns + '/channels' + channel, clientId, function() {
+
       self._server.debug('Unsubscribed client ? from channel ?', clientId, channel);
       if (callback) callback.call(context);
     });
@@ -159,21 +185,34 @@ Engine.prototype = {
 
     var self        = this,
         jsonMessage = JSON.stringify(message),
-        keys        = channels.map(function(c) { return self._ns + '/channels' + c });
+        keys        = channels.map(function(c) { return self._ns + '/channels' + c; });
 
     var notify = function(error, clients) {
-      clients.forEach(function(clientId) {
-        var queue = self._ns + '/clients/' + clientId + '/messages';
+      if(error) {
+        self._server.error('Error publishing message ?', error);
+        return;
+      }
 
-        self._server.debug('Queueing for client ?: ?', clientId, message);
-        self._redis.rpush(queue, jsonMessage);
-        self._redis.publish(self._messageChannel, clientId);
+      var publishKeys = [self._ns + '/clients', self._messageChannel].concat(clients.map(function(clientId) {
+        return self._ns + '/clients/' + clientId + '/messages';
+      }));
 
-        self.clientExists(clientId, function(exists) {
-          if (!exists) self._redis.del(queue);
+      var publishValues = [self._getCutOffTime(), jsonMessage].concat(clients);
+
+      self._scriptManager.run('publish', publishKeys, publishValues, function(err, result) {
+        if(error) {
+          self._server.error('Error publishing message ?', error);
+          return;
+        }
+
+        // Results is an array of clients to be deleted
+        result.forEach(function(clientId) {
+          self.destroyClient(clientId);
         });
+
       });
     };
+
     keys.push(notify);
     this._redis.sunion.apply(this._redis, keys);
 
@@ -216,6 +255,12 @@ Engine.prototype = {
         }, self);
       });
     }, this);
+  },
+
+  _getCutOffTime: function() {
+    if(typeof timeout !== 'number') return 0;
+
+    return new Date().getTime() - (1000 * 1.6 * this._server.timeout);
   },
 
   _withLock: function(lockName, callback, context) {

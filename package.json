@@ -14,6 +14,7 @@
   },
   "main": "./faye-redis",
   "dependencies": {
+    "gitter-redis-scripto": "^0.2.0",
     "redis": ""
   },
   "devDependencies": {
