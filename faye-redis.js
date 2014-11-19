@@ -1,3 +1,5 @@
+/* jshint node:true */
+'use strict';
 
 var Engine = function(server, options) {
   this._server  = server;
@@ -57,11 +59,11 @@ var Engine = function(server, options) {
     if (topic === self._closeChannel)   self._server.trigger('close', message);
   });
 
-  this._gc = setInterval(function() { self.gc() }, gc * 1000);
+  this._gc = setInterval(function() { self.gc(); }, gc * 1000);
 };
 
 Engine.create = function(server, options) {
-  return new this(server, options);
+  return new Engine(server, options);
 };
 
 Engine.prototype = {
@@ -70,6 +72,7 @@ Engine.prototype = {
   DEFAULT_DATABASE: 0,
   DEFAULT_GC:       60,
   LOCK_TIMEOUT:     120,
+  MAX_TIMEOUT_S:    86400,
 
   disconnect: function() {
     this._redis.end();
@@ -80,7 +83,14 @@ Engine.prototype = {
 
   createClient: function(callback, context) {
     var clientId = this._server.generateId(), self = this;
-    this._redis.zadd(this._ns + '/clients', 0, clientId, function(error, added) {
+
+    this._redis.zadd(this._ns + '/clients', 0, clientId, function(err, added) {
+
+      if (err) {
+        self._server.error('Error creating client: ?', err);
+        return callback.call(context, null);
+      }
+
       if (added === 0) return self.createClient(callback, context);
       self._server.debug('Created new client ?', clientId);
       self.ping(clientId);
@@ -90,17 +100,32 @@ Engine.prototype = {
   },
 
   clientExists: function(clientId, callback, context) {
+    var self = this;
     var cutoff = this._getCutOffTime();
 
-    this._redis.zscore(this._ns + '/clients', clientId, function(error, score) {
+    this._redis.zscore(this._ns + '/clients', clientId, function(err, score) {
+      if(err) {
+        self._server.error('Error checking client exists ?: ?', clientId, err);
+        return callback.call(context, false);
+      }
+
+      if(!score) return callback.call(context, false);
+
       callback.call(context, parseInt(score, 10) > cutoff);
     });
+
   },
 
   destroyClient: function(clientId, callback, context) {
     var self = this;
 
-    this._redis.smembers(this._ns + '/clients/' + clientId + '/channels', function(error, channels) {
+    this._redis.smembers(this._ns + '/clients/' + clientId + '/channels', function(err, channels) {
+      if (err) {
+        self._server.error('Error destroying client: ?', err);
+        if (callback) callback.call(context);
+        return;
+      }
+
       var multi = self._redis.multi();
 
       multi.zadd(self._ns + '/clients', 0, clientId);
@@ -113,7 +138,13 @@ Engine.prototype = {
       multi.zrem(self._ns + '/clients', clientId);
       multi.publish(self._closeChannel, clientId);
 
-      multi.exec(function(error, results) {
+      multi.exec(function(err, results) {
+        if (err) {
+          self._server.error('Error destroying client: ?', err);
+          if (callback) callback.call(context);
+          return;
+        }
+
         channels.forEach(function(channel, i) {
           if (results[2 * i + 1] !== 1) return;
           self._server.trigger('unsubscribe', clientId, channel);
@@ -129,13 +160,14 @@ Engine.prototype = {
   },
 
   ping: function(clientId) {
-    var timeout = this._server.timeout;
-    if (typeof timeout !== 'number') return;
+    var self = this;
+    this._server.debug('Ping ?', clientId);
 
-    var time = new Date().getTime();
-
-    this._server.debug('Ping ?, ?', clientId, time);
-    this._redis.zadd(this._ns + '/clients', time, clientId);
+    this._redis.zadd(this._ns + '/clients', Date.now(), clientId, function(err) {
+      if(err) {
+        self._server.error('Error pinging client ?: ?', clientId, err);
+      }
+    });
   },
 
   subscribe: function(clientId, channel, callback, context) {
@@ -185,11 +217,12 @@ Engine.prototype = {
 
     var self        = this,
         jsonMessage = JSON.stringify(message),
-        keys        = channels.map(function(c) { return self._ns + '/channels' + c; });
+        keys        = channels.map(function(c) { return self._ns + '/channels' + c; }),
+        cutoffTime  = self._getCutOffTime();
 
-    var notify = function(error, clients) {
-      if(error) {
-        self._server.error('Error publishing message ?', error);
+    var notify = function(err, clients) {
+      if(err) {
+        self._server.error('Error publishing message ?', err);
         return;
       }
 
@@ -197,11 +230,10 @@ Engine.prototype = {
         return self._ns + '/clients/' + clientId + '/messages';
       }));
 
-      var publishValues = [self._getCutOffTime(), jsonMessage].concat(clients);
-
+      var publishValues = [cutoffTime, jsonMessage].concat(clients);
       self._scriptManager.run('publish', publishKeys, publishValues, function(err, result) {
-        if(error) {
-          self._server.error('Error publishing message ?', error);
+        if(err) {
+          self._server.error('Error publishing message ?', err);
           return;
         }
 
@@ -226,41 +258,54 @@ Engine.prototype = {
         multi = this._redis.multi(),
         self  = this;
 
-    multi.lrange(key, 0, -1, function(error, jsonMessages) {
+    multi.lrange(key, 0, -1, function(err, jsonMessages) {
       if (!jsonMessages) return;
-      var messages = jsonMessages.map(function(json) { return JSON.parse(json) });
+      var messages = jsonMessages.map(function(json) { return JSON.parse(json); });
       self._server.deliver(clientId, messages);
     });
+
     multi.del(key);
-    multi.exec();
+    multi.exec(function(err) {
+      if(err) {
+        self._server.error('Error emptying queye: ?', err);
+      }
+    });
   },
 
   gc: function() {
-    var timeout = this._server.timeout;
-    if (typeof timeout !== 'number') return;
+    var self = this;
 
     this._withLock('gc', function(releaseLock) {
-      var cutoff = new Date().getTime() - 1000 * 2 * timeout,
-          self   = this;
+      var cutoff = self._getCutOffTime(2);
 
-      this._redis.zrangebyscore(this._ns + '/clients', 0, cutoff, function(error, clients) {
+      self._redis.zrangebyscore(self._ns + '/clients', 0, cutoff, function(err, clients) {
+        if(err) {
+          self._server.error('Error listing gc clients message ?', err);
+          return releaseLock();
+        }
+
         var i = 0, n = clients.length;
-        if (i === n) return releaseLock();
+        if (n === 0) return releaseLock();
 
         clients.forEach(function(clientId) {
-          this.destroyClient(clientId, function() {
+          self.destroyClient(clientId, function() {
             i += 1;
             if (i === n) releaseLock();
-          }, this);
-        }, self);
+          });
+        });
+
       });
-    }, this);
+
+    });
   },
 
-  _getCutOffTime: function() {
-    if(typeof timeout !== 'number') return 0;
+  _getCutOffTime: function(multiplier) {
+    var timeout = this._server.timeout;
+    if(typeof timeout !== 'number') {
+      timeout = this.MAX_TIMEOUT_S; /* There is always a timeout */
+    }
 
-    return new Date().getTime() - (1000 * 1.6 * this._server.timeout);
+    return Date.now() - 1000 * (multiplier || 1.6) * timeout;
   },
 
   _withLock: function(lockName, callback, context) {
@@ -273,16 +318,16 @@ Engine.prototype = {
       if (new Date().getTime() < expiry) self._redis.del(lockKey);
     };
 
-    this._redis.setnx(lockKey, expiry, function(error, set) {
+    this._redis.setnx(lockKey, expiry, function(err, set) {
       if (set === 1) return callback.call(context, releaseLock);
 
-      self._redis.get(lockKey, function(error, timeout) {
+      self._redis.get(lockKey, function(err, timeout) {
         if (!timeout) return;
 
         var lockTimeout = parseInt(timeout, 10);
         if (currentTime < lockTimeout) return;
 
-        self._redis.getset(lockKey, expiry, function(error, oldValue) {
+        self._redis.getset(lockKey, expiry, function(err, oldValue) {
           if (oldValue !== timeout) return;
           callback.call(context, releaseLock);
         });

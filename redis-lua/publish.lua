@@ -15,7 +15,7 @@ for i, client_message_key in ipairs(KEYS) do
   -- Ensure that the client cutoff has not been reached
   local client_cutoff = tonumber(redis.call("ZSCORE", clients_key, client_id));
   
-  if client_cutoff > cutoff then
+  if (client_cutoff ~= nil) and (client_cutoff > cutoff) then
     redis.call("RPUSH", client_message_key, json_message);
     redis.call("PUBLISH", message_channel_key, client_id);
   else
