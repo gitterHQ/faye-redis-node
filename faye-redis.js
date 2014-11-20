@@ -16,6 +16,7 @@ var Engine = function(server, options) {
       socket = this._options.socket,
       Scripto = require('gitter-redis-scripto');
 
+  this._statsDelegate = this._options.statsDelegate || function() {};
   this._ns  = this._options.namespace || '';
 
   if (client) {
@@ -84,9 +85,14 @@ Engine.prototype = {
   createClient: function(callback, context) {
     var clientId = this._server.generateId(), self = this;
 
+    this._statsDelegate('engine', 'create');
+
     this._redis.zadd(this._ns + '/clients', 0, clientId, function(err, added) {
 
       if (err) {
+        self._statsDelegate('engine', 'error');
+        self._statsDelegate('engine', 'error.create_client');
+
         self._server.error('Error creating client: ?', err);
         return callback.call(context, null);
       }
@@ -103,8 +109,13 @@ Engine.prototype = {
     var self = this;
     var cutoff = this._getCutOffTime();
 
+    this._statsDelegate('engine', 'exists');
+
     this._redis.zscore(this._ns + '/clients', clientId, function(err, score) {
       if(err) {
+        self._statsDelegate('engine', 'error');
+        self._statsDelegate('engine', 'error.client_exists');
+
         self._server.error('Error checking client exists ?: ?', clientId, err);
         return callback.call(context, false);
       }
@@ -119,8 +130,13 @@ Engine.prototype = {
   destroyClient: function(clientId, callback, context) {
     var self = this;
 
+    this._statsDelegate('engine', 'destroy');
+
     this._redis.smembers(this._ns + '/clients/' + clientId + '/channels', function(err, channels) {
       if (err) {
+        self._statsDelegate('engine', 'error');
+        self._statsDelegate('engine', 'error.destroy_client_1');
+
         self._server.error('Error destroying client: ?', err);
         if (callback) callback.call(context);
         return;
@@ -141,6 +157,9 @@ Engine.prototype = {
 
       multi.exec(function(err, results) {
         if (err) {
+          self._statsDelegate('engine', 'error');
+          self._statsDelegate('engine', 'error.destroy_client_2');
+
           self._server.error('Error destroying client: ?', err);
           if (callback) callback.call(context);
           return;
@@ -162,10 +181,14 @@ Engine.prototype = {
 
   ping: function(clientId) {
     var self = this;
+    this._statsDelegate('engine', 'ping');
     this._server.debug('Ping ?', clientId);
 
     this._redis.zadd(this._ns + '/clients', Date.now(), clientId, function(err) {
       if(err) {
+        self._statsDelegate('engine', 'error');
+        self._statsDelegate('engine', 'error.ping');
+
         self._server.error('Error pinging client ?: ?', clientId, err);
       }
     });
@@ -175,11 +198,16 @@ Engine.prototype = {
     var self = this,
         multi = this._redis.multi();
 
+    this._statsDelegate('engine', 'subscribe');
+
     multi.sadd(this._ns + '/clients/' + clientId + '/channels', channel);
     multi.sadd(this._ns + '/channels' + channel, clientId);
 
     multi.exec(function(err, replies) {
       if(err) {
+        self._statsDelegate('engine', 'error');
+        self._statsDelegate('engine', 'error.subscribe');
+
         if (callback) callback.call(context, err);
         return;
       }
@@ -196,11 +224,16 @@ Engine.prototype = {
     var self = this,
         multi = this._redis.multi();
 
+    this._statsDelegate('engine', 'unsubscribe');
+
     multi.srem(this._ns + '/clients/' + clientId + '/channels', channel);
     multi.srem(this._ns + '/channels' + channel, clientId);
 
     multi.exec(function(err, replies) {
       if(err) {
+        self._statsDelegate('engine', 'error');
+        self._statsDelegate('engine', 'error.unsubscribe');
+
         if (callback) callback.call(context, err);
         return;
       }
@@ -221,8 +254,13 @@ Engine.prototype = {
         keys        = channels.map(function(c) { return self._ns + '/channels' + c; }),
         cutoffTime  = self._getCutOffTime();
 
+    this._statsDelegate('engine', 'publish');
+
     var notify = function(err, clients) {
       if(err) {
+        self._statsDelegate('engine', 'error');
+        self._statsDelegate('engine', 'error.publish_notify');
+
         self._server.error('Error publishing message ?', err);
         return;
       }
@@ -234,12 +272,17 @@ Engine.prototype = {
       var publishValues = [cutoffTime, jsonMessage].concat(clients);
       self._scriptManager.run('publish', publishKeys, publishValues, function(err, result) {
         if(err) {
+          self._statsDelegate('engine', 'error');
+          self._statsDelegate('engine', 'error.publish_query');
+
           self._server.error('Error publishing message ?', err);
           return;
         }
 
         // Results is an array of clients to be deleted
         result.forEach(function(clientId) {
+          self._statsDelegate('engine', 'publish_forced_client_delete');
+
           self.destroyClient(clientId);
         });
 
@@ -259,8 +302,13 @@ Engine.prototype = {
         count_key = this._ns + '/counts',
         self  = this;
 
+    this._statsDelegate('engine', 'empty');
+
     self._scriptManager.run('empty', [key, count_key], [clientId], function(err, result) {
       if(err) {
+        self._statsDelegate('engine', 'error');
+        self._statsDelegate('engine', 'error.empty');
+
         self._server.error('Error emptying queue: ?', err);
         return;
       }
@@ -297,10 +345,15 @@ Engine.prototype = {
     var self = this;
 
     this._withLock('gc', function(releaseLock) {
+      this._statsDelegate('engine', 'gc');
+
       var cutoff = self._getCutOffTime(2);
 
       self._redis.zrangebyscore(self._ns + '/clients', 0, cutoff, function(err, clients) {
         if(err) {
+          self._statsDelegate('engine', 'error');
+          self._statsDelegate('engine', 'error.gc_list');
+
           self._server.error('Error listing gc clients message ?', err);
           return releaseLock();
         }
@@ -309,6 +362,8 @@ Engine.prototype = {
         if (n === 0) return releaseLock();
 
         clients.forEach(function(clientId) {
+          self._statsDelegate('engine', 'gc_client');
+
           self.destroyClient(clientId, function() {
             i += 1;
             if (i === n) releaseLock();
