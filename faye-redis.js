@@ -345,7 +345,7 @@ Engine.prototype = {
     var self = this;
 
     this._withLock('gc', function(releaseLock) {
-      this._statsDelegate('engine', 'gc');
+      self._statsDelegate('engine', 'gc');
 
       var cutoff = self._getCutOffTime(2);
 
