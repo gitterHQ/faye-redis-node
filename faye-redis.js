@@ -87,7 +87,7 @@ Engine.prototype = {
 
     this._statsDelegate('engine', 'create');
 
-    this._redis.zadd(this._ns + '/clients', 0, clientId, function(err, added) {
+    this._redis.zadd(this._ns + '/clients', Date.now(), clientId, function(err, added) {
 
       if (err) {
         self._statsDelegate('engine', 'error');
@@ -97,9 +97,13 @@ Engine.prototype = {
         return callback.call(context, null);
       }
 
-      if (added === 0) return self.createClient(callback, context);
+      if (added === 0) {
+        // The classic "this should never happen" comment here
+        self._server.error('Unable to create client as id already exists ?', clientId);
+        return self.createClient(callback, context);
+      }
+
       self._server.debug('Created new client ?', clientId);
-      self.ping(clientId);
       self._server.trigger('handshake', clientId);
       callback.call(context, clientId);
     });
@@ -184,13 +188,21 @@ Engine.prototype = {
     this._statsDelegate('engine', 'ping');
     this._server.debug('Ping ?', clientId);
 
-    this._redis.zadd(this._ns + '/clients', Date.now(), clientId, function(err) {
+    var cutoffTime = self._getCutOffTime();
+
+    self._scriptManager.run('ping', [this._ns + '/clients'], [clientId, Date.now(), cutoffTime], function(err, result) {
       if(err) {
         self._statsDelegate('engine', 'error');
         self._statsDelegate('engine', 'error.ping');
 
         self._server.error('Error pinging client ?: ?', clientId, err);
+        return;
       }
+
+      if(result === 0) {
+        self._server.error('Client ping for non-existant client ?', clientId);
+      }
+
     });
   },
 
