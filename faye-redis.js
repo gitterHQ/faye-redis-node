@@ -128,7 +128,8 @@ Engine.prototype = {
 
       var multi = self._redis.multi();
 
-      multi.zadd(self._ns + '/clients', 0, clientId);
+      multi.zrem(self._ns + '/clients', clientId);
+      multi.zrem(self._ns + '/counts', clientId);
 
       channels.forEach(function(channel) {
         multi.srem(self._ns + '/clients/' + clientId + '/channels', channel);
