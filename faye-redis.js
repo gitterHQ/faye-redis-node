@@ -255,21 +255,41 @@ Engine.prototype = {
     if (!this._server.hasConnection(clientId)) return;
 
     var key   = this._ns + '/clients/' + clientId + '/messages',
-        multi = this._redis.multi(),
+        count_key = this._ns + '/counts',
         self  = this;
 
-    multi.lrange(key, 0, -1, function(err, jsonMessages) {
-      if (!jsonMessages) return;
-      var messages = jsonMessages.map(function(json) { return JSON.parse(json); });
+    self._scriptManager.run('empty', [key, count_key], [clientId], function(err, result) {
+      if(err) {
+        self._server.error('Error emptying queue: ?', err);
+        return;
+      }
+
+      var total = result[0];
+      var jsonMessages = result[1];
+
+      if(!jsonMessages || !jsonMessages.length) {
+        return;
+      }
+
+      var start = total - jsonMessages.length + 1;
+      var includeSequence = self._options.includeSequence;
+      var messages = jsonMessages.map(function(json, index) {
+        var message = JSON.parse(json);
+
+        if(includeSequence) {
+          if(message.ext) {
+            message.ext.c = start + index;
+          } else {
+            message.ext = { c: start + index };
+          }
+        }
+
+        return message;
+      });
+
       self._server.deliver(clientId, messages);
     });
 
-    multi.del(key);
-    multi.exec(function(err) {
-      if(err) {
-        self._server.error('Error emptying queye: ?', err);
-      }
-    });
   },
 
   gc: function() {
