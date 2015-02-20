@@ -27,8 +27,5 @@
   "repository": {
     "type": "git",
     "url": "git://github.com/faye/faye-redis-node.git"
-  },
-  "publishConfig": {
-    "registry": "http://beta-internal:8089/nexus/content/repositories/gitter-private/"
   }
 }
