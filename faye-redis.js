@@ -1,4 +1,3 @@
-/* jshint node:true */
 'use strict';
 
 var Engine = function(server, options) {
@@ -87,8 +86,12 @@ Engine.prototype = {
 
     this._statsDelegate('engine', 'create');
 
-    this._redis.zadd(this._ns + '/clients', Date.now(), clientId, function(err, added) {
+    var multi = this._redis.multi();
 
+    multi.zadd(this._ns + '/clients', Date.now(), clientId);
+    multi.zadd(this._ns + '/timeouts',this._server.timeout, clientId);
+
+    multi.exec(function(err, results) {
       if (err) {
         self._statsDelegate('engine', 'error');
         self._statsDelegate('engine', 'error.create_client');
@@ -97,25 +100,31 @@ Engine.prototype = {
         return callback.call(context, null);
       }
 
+      var added = results[0];
       if (added === 0) {
         // The classic "this should never happen" comment here
         self._server.error('Unable to create client as id already exists ?', clientId);
-        return self.createClient(callback, context);
+        return callback.call(context, null);
       }
 
       self._server.debug('Created new client ?', clientId);
       self._server.trigger('handshake', clientId);
       callback.call(context, clientId);
     });
+
   },
 
   clientExists: function(clientId, callback, context) {
     var self = this;
-    var cutoff = this._getCutOffTime();
 
     this._statsDelegate('engine', 'exists');
 
-    this._redis.zscore(this._ns + '/clients', clientId, function(err, score) {
+    var multi = this._redis.multi();
+
+    multi.zscore(this._ns + '/clients', clientId);
+    multi.zscore(this._ns + '/timeouts', clientId);
+
+    multi.exec(function(err, results) {
       if(err) {
         self._statsDelegate('engine', 'error');
         self._statsDelegate('engine', 'error.client_exists');
@@ -124,7 +133,17 @@ Engine.prototype = {
         return callback.call(context, false);
       }
 
+      var score = results[0];
+      var timeout = results[1];
+
       if(!score) return callback.call(context, false);
+      if(timeout) {
+        timeout = parseInt(timeout, 10);
+      } else {
+        timeout = this._server.timeout;
+      }
+
+      var cutoff = this._getCutOffTime(timeout);
 
       callback.call(context, parseInt(score, 10) > cutoff);
     });
@@ -150,6 +169,7 @@ Engine.prototype = {
 
       multi.zrem(self._ns + '/clients', clientId);
       multi.zrem(self._ns + '/counts', clientId);
+      multi.zrem(self._ns + '/timeouts', clientId);
 
       channels.forEach(function(channel) {
         multi.srem(self._ns + '/clients/' + clientId + '/channels', channel);
@@ -188,9 +208,7 @@ Engine.prototype = {
     this._statsDelegate('engine', 'ping');
     this._server.debug('Ping ?', clientId);
 
-    var cutoffTime = self._getCutOffTime();
-
-    self._scriptManager.run('ping', [this._ns + '/clients'], [clientId, Date.now(), cutoffTime], function(err, result) {
+    self._scriptManager.run('ping', [this._ns + '/clients', this._ns + '/timeouts',], [clientId, Date.now(), self._getTimeout()], function(err, result) {
       if(err) {
         self._statsDelegate('engine', 'error');
         self._statsDelegate('engine', 'error.ping');
@@ -263,8 +281,7 @@ Engine.prototype = {
 
     var self        = this,
         jsonMessage = JSON.stringify(message),
-        keys        = channels.map(function(c) { return self._ns + '/channels' + c; }),
-        cutoffTime  = self._getCutOffTime();
+        keys        = channels.map(function(c) { return self._ns + '/channels' + c; });
 
     this._statsDelegate('engine', 'publish');
 
@@ -277,11 +294,11 @@ Engine.prototype = {
         return;
       }
 
-      var publishKeys = [self._ns + '/clients', self._messageChannel].concat(clients.map(function(clientId) {
+      var publishKeys = [self._ns + '/clients', self._ns + '/timeouts', self._messageChannel].concat(clients.map(function(clientId) {
         return self._ns + '/clients/' + clientId + '/messages';
       }));
 
-      var publishValues = [cutoffTime, jsonMessage].concat(clients);
+      var publishValues = [self._getTimeout(), Date.now(), jsonMessage].concat(clients);
       self._scriptManager.run('publish', publishKeys, publishValues, function(err, result) {
         if(err) {
           self._statsDelegate('engine', 'error');
@@ -359,6 +376,7 @@ Engine.prototype = {
     this._withLock('gc', function(releaseLock) {
       self._statsDelegate('engine', 'gc');
 
+      // TODO: get rid of this and handle it on a per-client basis
       var cutoff = self._getCutOffTime(2);
 
       self._redis.zrangebyscore(self._ns + '/clients', 0, cutoff, function(err, clients) {
@@ -387,10 +405,13 @@ Engine.prototype = {
     });
   },
 
-  _getCutOffTime: function(multiplier) {
-    var timeout = this._server.timeout;
-    if(typeof timeout !== 'number') {
-      timeout = this.MAX_TIMEOUT_S; /* There is always a timeout */
+  _getTimeout: function() {
+    return typeof this._server.timeout === 'number' ? this._server.timeout : this.MAX_TIMEOUT_S;
+  },
+
+  _getCutOffTime: function(timeout, multiplier) {
+    if (!timeout) {
+      timeout = this._getTimeout();
     }
 
     return Date.now() - 1000 * (multiplier || 1.6) * timeout;
