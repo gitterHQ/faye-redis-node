@@ -9,7 +9,9 @@ JS.Test.describe("Redis engine", function() { with(this) {
   after(function(resume) { with(this) {
     engine.disconnect()
     var redis = require('redis').createClient(6379, 'localhost', {no_ready_check: true})
-    redis.auth(engineOpts.password)
+    if (engineOpts.password) {
+      redis.auth(engineOpts.password);
+    }
     redis.flushall(function() {
       redis.end()
       resume()
@@ -28,11 +30,11 @@ JS.Test.describe("Redis engine", function() { with(this) {
       var client = redis.createClient(6379, 'localhost', {no_ready_check: true})
       var subscriberClient = redis.createClient(6379, 'localhost', {no_ready_check: true})
 
-      if(!process.env.TRAVIS) {
-        client.auth("foobared")
-        subscriberClient.auth("foobared")
+      if (engineOpts.password) {
+        client.auth(engineOpts.password);
+        subscriberClient.auth(engineOpts.password);
       }
-
+      
       this.engineOpts = {type: RedisEngine, client: client, subscriberClient: subscriberClient, namespace: new Date().getTime().toString()}
     }})
 
