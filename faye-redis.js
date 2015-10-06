@@ -140,10 +140,10 @@ Engine.prototype = {
       if(timeout) {
         timeout = parseInt(timeout, 10);
       } else {
-        timeout = this._server.timeout;
+        timeout = self._server.timeout;
       }
 
-      var cutoff = this._getCutOffTime(timeout);
+      var cutoff = self._getCutOffTime(timeout);
 
       callback.call(context, parseInt(score, 10) > cutoff);
     });
