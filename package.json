@@ -1,5 +1,5 @@
 {
-  "name": "gitter-faye-redis",
+  "name": "@gitterhq/faye-redis",
   "description": "Redis backend engine for Faye, as used by Gitter",
   "homepage": "http://github.com/faye/faye-redis-node",
   "author": "James Coglan <jcoglan@gmail.com> (http://jcoglan.com/)",
